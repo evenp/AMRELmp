@@ -13,8 +13,8 @@ copy ..\deps\stb\stb_image_write.h ..\src\Libs\stbi
 REM COPYING SHAPELIB's DLL
 echo -------SHAPELIB's DLL-------
 mkdir ..\binaries 2> NUL
-mkdir ..\binaries\ILSD\Release 2> NUL
-mkdir ..\binaries\ILSD\Debug 2> NUL
+mkdir ..\binaries\AMREL\Release 2> NUL
+mkdir ..\binaries\AMREL\Debug 2> NUL
 copy ..\deps\shapelib\build\Debug\shp.dll ..\binaries\AMREL\Release
 copy ..\deps\shapelib\build\Debug\shp.dll ..\binaries\AMREL\Debug
 

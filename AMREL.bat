@@ -41,10 +41,9 @@ REM echo compiling AMREL for Debug x64...
 REM "%VSPATH%" %ILSDPATH%\AMREL.vcxproj /t:build /p:Configuration="Debug" /p:Platform="x64" /p:BuildInParallel=true /p:OutDir=%AMRELPATH%\binaries\AMREL\Debug
 REM IF NOT %errorLevel% == 0 ECHO failed to compile AMREL.
 
-pause
 
-#echo STARTING AMREL...
-#cd %AMRELPATH%\resources
-#..\binaries\AMREL\Release\AMREL.exe
-#pause
+echo STARTING AMREL...
+cd %AMRELPATH%\resources
+..\binaries\AMREL\Release\AMREL.exe
+pause
 exit 0
