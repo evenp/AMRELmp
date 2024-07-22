@@ -23,9 +23,10 @@
 #include <fstream>
 #include <cmath>
 #include "amreltool.h"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
 #include "shapefil.h"
+
+#include "rorpo.hpp"
+#include "image_png.hpp"
 
 
 const int AmrelTool::NOMINAL_PLATEAU_LACK_TOLERANCE = 5;
@@ -41,6 +42,7 @@ AmrelTool::AmrelTool ()
 {
   sub_div = AmrelConfig::DTM_GRID_SUBDIVISION_FACTOR;
   dtm_in = NULL;
+  rorpo_map = NULL;
   ctdet = NULL;
   dtm_map = NULL;
   gmap = NULL;
@@ -99,6 +101,13 @@ void AmrelTool::clearShading ()
 {
   if (dtm_map != NULL) delete [] dtm_map;
   dtm_map = NULL;
+}
+
+
+void AmrelTool::clearRorpo ()
+{
+  if (rorpo_map != NULL) delete [] rorpo_map;
+  rorpo_map = NULL;
 }
 
 
@@ -274,7 +283,15 @@ void AmrelTool::run ()
   {
     if (loadTileSet (false, false)) checkSeeds ();
   }
-  else if (cfg.isHillMapOn ()) saveHillImage ();
+  else if (cfg.isHillMapOn ())
+  {
+    if (loadTileSet (true, false))
+    {
+      saveHillImage ();
+      clear ();
+    }
+    return;
+  }
 
   // FULL AUTOMATIC DETECTION
   //-------------------------------------------------------------------------
@@ -320,34 +337,35 @@ void AmrelTool::run ()
   }
 
 
-  /*
   // AUTOMATIC DETECTION STEP 2 : RORPO
   //-------------------------------------------------------------------------
   else if (cfg.step () == AmrelConfig::STEP_RORPO)
   {
     if (! loadShadingMap ()) return;
-    processRorpo ();
+    processRorpo (vm_width, vm_height);
     if (saveRorpoMap ())
     {
       if (cfg.isOutMapOn ()) saveRorpoImage ();
       clearShading ();
     }
   }
-  */
 
 
   // AUTOMATIC DETECTION STEP 3 : SOBEL
   //-------------------------------------------------------------------------
   else if (cfg.step () == AmrelConfig::STEP_SOBEL)
   {
-    // if (! loadRorpoMap ()) return;
-    if (! loadShadingMap ()) return; // Added
+    if (cfg.rorpoSkipped ())
+    {
+      if (! loadShadingMap ()) return;
+    }
+    else if (! loadRorpoMap ()) return;
     processSobel (vm_width, vm_height);
     if (saveSobelMap ())
     {
       if (cfg.isOutMapOn ()) saveSobelImage ();
-      // clearRorpo ();
-      clearShading (); // Added
+      if (cfg.rorpoSkipped ()) clearShading ();
+      else clearRorpo ();
     }
   }
 
@@ -400,13 +418,13 @@ void AmrelTool::run ()
 void AmrelTool::processShading ()
 {
   if (cfg.isVerboseOn ()) std::cout << "Shading ..." << std::endl;
-  if (dtm_map == NULL)
-    dtm_map = new unsigned char [vm_width * vm_height];
-  unsigned char *pmap = dtm_map;
+  if (dtm_map == NULL) dtm_map = new unsigned char[vm_width * vm_height];
+  unsigned char *dtmp = dtm_map;
+  int shtype = (cfg.rorpoSkipped () ? TerrainMap::SHADE_EXP_SLOPE
+                                    : TerrainMap::SHADE_SLOPE);
   for (int j = 0; j < vm_height; j ++)
-    for (int i = 0; i < vm_width; i ++) *pmap ++
-          = (unsigned char) dtm_in->get (i, j, TerrainMap::SHADE_EXP_SLOPE);
-  //        = (unsigned char) dtm_in->get (i, j, TerrainMap::SHADE_SLOPE);
+    for (int i = 0; i < vm_width; i ++)
+      *dtmp ++ = (unsigned char) dtm_in->get (i, j, shtype);
   if (cfg.isVerboseOn ()) std::cout << "Shading OK" << std::endl;
 }
 
@@ -414,7 +432,9 @@ void AmrelTool::processShading ()
 void AmrelTool::processSobel (int w, int h)
 {
   if (cfg.isVerboseOn ()) std::cout << "Sobel 5x5 ..." << std::endl;
-  gmap = new VMap (w, h, dtm_map, VMap::TYPE_SOBEL_5X5);
+  if (cfg.rorpoSkipped ())
+    gmap = new VMap (w, h, dtm_map, VMap::TYPE_SOBEL_5X5);
+  else gmap = new VMap (w, h, rorpo_map, VMap::TYPE_SOBEL_5X5);
   bsdet.setGradientMap (gmap);
   if (cfg.isVerboseOn ()) std::cout << "Sobel 5x5 OK" << std::endl;
 }
@@ -666,11 +686,14 @@ bool AmrelTool::processSawing ()
     if (! loadTileSet (true, false)) return false;
     processShading ();
     clearDtm ();
-    // processRorpo ();
-    // clearShading ();
+    if (! cfg.rorpoSkipped ())
+    {
+      processRorpo (vm_width, vm_height);
+      clearShading ();
+    }
     processSobel (vm_width, vm_height);
-    // clearRorpo ();
-    clearShading (); // Added
+    if (cfg.rorpoSkipped ()) clearShading ();
+    else clearRorpo ();
     processFbsd ();
     clearSobel ();
     processSeeds ();
@@ -741,6 +764,8 @@ bool AmrelTool::processSawing ()
   vm_height = dtm_h * ptset->rowsOfTiles ();
   csize = dtm_in->cellSize ();
   dtm_map = new unsigned char[pad_w * dtm_w * pad_h * dtm_h];
+  if (! cfg.rorpoSkipped ())
+    rorpo_map = new unsigned char[pad_w * dtm_w * pad_h * dtm_h];
   out_seeds =
     new std::vector<Pt2i>[ptset->columnsOfTiles() * ptset->rowsOfTiles()];
 
@@ -751,16 +776,21 @@ bool AmrelTool::processSawing ()
     if (cfg.isVerboseOn ())
       std::cout << "  --> Pad " << k << " (" << (k % ptset->columnsOfTiles ())
                 << ", " << (k / ptset->columnsOfTiles ()) << "):" << std::endl;
+    if (! cfg.rorpoSkipped ()) processRorpo (pad_w * dtm_w, pad_h * dtm_h);
     processSobel (pad_w * dtm_w, pad_h * dtm_h);
-    unsigned char *mymap = dtm_map; // Added
-    for (int i = 0; i < pad_h * dtm_h * pad_w * dtm_w; i++) *mymap++ = 0;
+    if (! cfg.rorpoSkipped ())
+    {
+      unsigned char *mymap = rorpo_map;
+      for (int i = 0; i < pad_h * dtm_h * pad_w * dtm_w; i++)
+        *mymap++ = (unsigned char) 0;
+    }
     processFbsd ();
     clearSobel ();
     processSeeds (k);
     clearFbsd ();
     k = dtm_in->nextPad (dtm_map);
   }
-  // clearRorpo ();
+  if (! cfg.rorpoSkipped ()) clearRorpo ();
   clearShading ();
   return true;
 }
@@ -779,8 +809,7 @@ bool AmrelTool::saveShadingMap ()
   shading_out.write ((char *) (&vm_width), sizeof (int));
   shading_out.write ((char *) (&vm_height), sizeof (int));
   shading_out.write ((char *) (&csize), sizeof (float));
-  unsigned char *im = dtm_map;
-  shading_out.write ((char *) im,
+  shading_out.write ((char *) dtm_map,
                      vm_width * vm_height * sizeof (unsigned char));
   shading_out.close ();
   return true;
@@ -801,9 +830,50 @@ bool AmrelTool::loadShadingMap ()
   shading_in.read ((char *) (&vm_height), sizeof (int));
   shading_in.read ((char *) (&csize), sizeof (float));
   dtm_map = new unsigned char[vm_width * vm_height];
-  unsigned char *im = dtm_map;
-  shading_in.read ((char *) im, vm_width * vm_height * sizeof (unsigned char));
+  shading_in.read ((char *) dtm_map,
+                   vm_width * vm_height * sizeof (unsigned char));
   shading_in.close ();
+  return true;
+}
+
+
+bool AmrelTool::saveRorpoMap ()
+{
+  std::string name (AmrelConfig::RES_DIR + AmrelConfig::RORPO_FILE
+                    + AmrelConfig::MAP_SUFFIX);
+  std::ofstream rorpo_out (name.c_str (), std::ios::out);
+  if (! rorpo_out)
+  {
+    std::cout << "Can't save Rorpo map in " << name << std::endl;
+    return false;
+  }
+  rorpo_out.write ((char *) (&vm_width), sizeof (int));
+  rorpo_out.write ((char *) (&vm_height), sizeof (int));
+  rorpo_out.write ((char *) (&csize), sizeof (float));
+  rorpo_out.write ((char *) rorpo_map,
+                   vm_width * vm_height * sizeof (unsigned char));
+  rorpo_out.close ();
+  return true;
+}
+
+
+bool AmrelTool::loadRorpoMap ()
+{
+  std::string name (AmrelConfig::RES_DIR + AmrelConfig::RORPO_FILE
+                    + AmrelConfig::MAP_SUFFIX);
+  std::ifstream rorpo_in (name.c_str (), std::ios::in);
+  if (! rorpo_in)
+  {
+    std::cout << name << ": can't be opened" << std::endl;
+    return false;
+  }
+  rorpo_in.read ((char *) (&vm_width), sizeof (int));
+  rorpo_in.read ((char *) (&vm_height), sizeof (int));
+  rorpo_in.read ((char *) (&csize), sizeof (float));
+  rorpo_map = new unsigned char[vm_width * vm_height];
+  rorpo_in.read ((char *) rorpo_map,
+                 vm_width * vm_height * sizeof (unsigned char));
+  rorpo_in.close ();
   return true;
 }
 
@@ -1113,360 +1183,6 @@ void AmrelTool::saveSuccessfulSeeds ()
 }
 
 
-void AmrelTool::saveHillImage ()
-{
-/* TOPNG
-  if (! loadTileSet (true, false)) return;
-  Image2D<unsigned char> im (vm_width, vm_height);
-  for (int j = 0; j < vm_height; j ++)
-    for (int i = 0; i < vm_width; i ++)
-    {
-      int val = dtm_in->get (i, j, TerrainMap::SHADE_HILL);
-      if (val > 255) val = 255;
-      else if (val < 0) val = 0;
-      im (i, j) = (unsigned char) val;
-    }
-  write_2D_png_image (im, AmrelConfig::RES_DIR + AmrelConfig::HILL_FILE
-                          + AmrelConfig::IM_SUFFIX);
-  clear ();
-*/
-}
-
-
-void AmrelTool::saveShadingImage ()
-{
-/* TOPNG
-  Image2D<unsigned char> im (vm_width, vm_height);
-  for (int j = 0; j < vm_height; j ++)
-    for (int i = 0; i < vm_width; i ++)
-      im (i, j) = (unsigned char) dtm_in->get (i, j, TerrainMap::SHADE_SLOPE);
-  write_2D_png_image (im, AmrelConfig::RES_DIR + AmrelConfig::SLOPE_FILE
-                          + AmrelConfig::IM_SUFFIX);
-*/
-}
-
-
-void AmrelTool::saveSobelImage ()
-{
-/* TOPNG
-  int w = gmap->getWidth ();
-  int h = gmap->getHeight ();
-  double *gn = new double[w * h];
-  for (int j = 0; j < h; j++)
-    for (int i = 0; i < w; i++)
-      gn[j * w + i] = gmap->magn (i, j);
-  double min = gn[0];
-  double max = gn[0];
-  for (int i = 1; i < w * h; i++)
-  {
-    if (max < gn[i]) max = gn[i];
-    if (min > gn[i]) min = gn[i];
-  }
-  Image2D<unsigned char> im (w, h);
-  unsigned char *pim = im.get_pointer ();
-  for (int j = 0; j < h; j++)
-    for (int i = 0; i < w; i++)
-      *pim++ = (unsigned char) ((gn[j * w + i] - min) * 255 / (max - min));
-  write_2D_png_image (im, AmrelConfig::RES_DIR + AmrelConfig::SOBEL_FILE
-                          + AmrelConfig::IM_SUFFIX);
-*/
-}
-
-
-void AmrelTool::saveFbsdImage (int im_w, int im_h)
-{
-/* TOPNG
-  std::vector<BlurredSegment *> bss = bsdet.getBlurredSegments ();
-  if (bss.empty ()) return;
-
-  if (cfg.isFalseColorOn ())
-  {
-    Image2D<unsigned int> im (im_w, im_h);
-    unsigned int *pim = im.get_pointer ();
-    for (int i = 0; i < im_w * im_h; i++)
-      *pim++ = (unsigned int) (255 + 255 * 256 + 255 * 256 * 256);
-    srand (time (NULL));
-
-    if (cfg.isBackDtmOn ())
-    {
-      if (dtm_in == NULL) loadTileSet (true, false);
-      if (dtm_in != NULL)
-      {
-        pim = im.get_pointer ();
-        for (int j = 0; j < im_h; j++)
-          for (int i = 0; i < im_w; i++)
-            *pim++ = (unsigned int) (dtm_in->get (i, j)) * (257 + 256 * 256);
-      }
-    }
-
-    std::vector<BlurredSegment *>::iterator it = bss.begin ();
-    while (it != bss.end ())
-    {
-      bool nok = true;
-      int red = 0, green = 0, blue = 0;
-      while (nok)
-      {
-        red = rand () % 256;
-        green = rand () % 256;
-        blue = rand () % 256;
-        nok = ((red + green + blue) > 300);     // < 300 si fond noir
-      }
-      pim = im.get_pointer ();
-      std::vector<Pt2i> pts = (*it)->getAllPoints ();
-      std::vector<Pt2i>::iterator pit = pts.begin ();
-      while (pit != pts.end ())
-      {
-        *(pim + pit->y () * im_w + pit->x ())
-                  = (unsigned int) (red + green * 256 + blue * 256 * 256);
-        pit ++;
-      }
-      it ++;
-    }
-    write_2D_png_color_image (im,
-      AmrelConfig::RES_DIR + AmrelConfig::FBSD_FILE + AmrelConfig::IM_SUFFIX);
-  }
-  else
-  {
-    Image2D<unsigned char> im (im_w, im_h);
-    unsigned char *pim = im.get_pointer ();
-    for (int i = 0; i < im_w * im_h; i++) *pim++ = (unsigned char) 255;
-
-    if (cfg.isBackDtmOn ())
-    {
-      if (dtm_in == NULL) loadTileSet (true, false);
-      if (dtm_in != NULL)
-      {
-        pim = im.get_pointer ();
-        for (int j = 0; j < im_h; j++)
-          for (int i = 0; i < im_w; i++)
-            *pim++ = (unsigned char) (dtm_in->get (i, j));
-      }
-    }
-
-    std::vector<BlurredSegment *>::iterator it = bss.begin ();
-    while (it != bss.end ())
-    {
-      pim = im.get_pointer ();
-      std::vector<Pt2i> pts = (*it)->getAllPoints ();
-      std::vector<Pt2i>::iterator pit = pts.begin ();
-      while (pit != pts.end ())
-      {
-        *(pim + pit->y () * im_w + pit->x ()) = (unsigned char) 0;
-        pit ++;
-      }
-      it ++;
-    }
-    write_2D_png_image (im,
-      AmrelConfig::RES_DIR + AmrelConfig::FBSD_FILE + AmrelConfig::IM_SUFFIX);
-  }
-*/
-}
-
-
-void AmrelTool::saveSeedsImage ()
-{
-/* TOPNG
-  int i_w = vm_width, i_h = vm_height;
-  if (dtm_in != NULL)
-  {
-    i_w = dtm_in->tileWidth ();
-    i_h = dtm_in->tileHeight ();
-  }
-  Image2D<unsigned char> im (i_w, i_h);
-  unsigned char *pim = im.get_pointer ();
-  for (int i = 0; i < i_w * i_h; i++) *pim++ = (unsigned char) 255;
-  if (cfg.isBackDtmOn ())
-  {
-    if (dtm_in == NULL) loadTileSet (true, false);
-    if (dtm_in != NULL)
-    {
-      pim = im.get_pointer ();
-      for (int j = 0; j < i_h; j++)
-        for (int i = 0; i < i_w; i++)
-          *pim++ = (unsigned char) (dtm_in->get (i, j));
-    }
-  }
-
-  pim = im.get_pointer ();
-  if (out_seeds != NULL)
-  {
-    std::vector<Pt2i>::iterator it;
-    int tsize = ptset->columnsOfTiles () * ptset->rowsOfTiles ();
-    for (int i = 0; i < tsize; i++)
-    {
-      it = out_seeds[i].begin ();
-      while (it != out_seeds[i].end ())
-      {
-        Pt2i pt1 = *it++;
-        Pt2i pt2 = *it++;
-        std::vector<Pt2i> line;
-        pt1.draw (line, pt2);
-        std::vector<Pt2i>::iterator pit = line.begin ();
-        while (pit != line.end ())
-        {
-          if (pit->x () >= 0 && pit->x () < i_w
-              && pit->y () >= 0 && pit->y () < i_h)
-            *(pim + (i_h - 1 - pit->y ()) * i_w + pit->x ())
-              = (unsigned char) 0;
-          pit ++;
-        }
-      }
-    }
-  }
-  write_2D_png_image (im, AmrelConfig::RES_DIR + AmrelConfig::SEED_FILE
-                          + AmrelConfig::IM_SUFFIX);
-*/
-}
-
-
-void AmrelTool::saveAsdImage ()
-{
-/* TOPNG
-  unsigned short *map = track_map;
-  if (map == NULL) return;
-
-  if (cfg.isFalseColorOn ())
-  {
-    srand (time (NULL));
-    unsigned char *red = new unsigned char[count_of_roads + 1];
-    unsigned char *green = new unsigned char[count_of_roads + 1];
-    unsigned char *blue = new unsigned char[count_of_roads + 1];
-    red[0] = (unsigned char) 255;
-    green[0] = (unsigned char) 255;
-    blue[0] = (unsigned char) 255;
-    for (int i = 1; i <= count_of_roads; i ++)
-    {
-      bool nok = true;
-      while (nok)
-      {
-        red[i] = rand () % 256;
-        green[i] = rand () % 256;
-        blue[i] = rand () % 256;
-        nok = ((red[i] + green[i] + blue[i]) > 300);     // < 300 si fond noir
-      }
-    }
-
-    Image2D<unsigned int> im (vm_width, vm_height);
-    unsigned int *pim = im.get_pointer ();
-    if (cfg.isBackDtmOn ())
-    {
-      if (dtm_in == NULL) loadTileSet (true, false);
-      if (dtm_in != NULL)
-      {
-        for (int j = 0; j < vm_height; j++)
-          for (int i = 0; i < vm_width; i++)
-            *pim++ = (unsigned int) (dtm_in->get (i, j)) * 257 + 256 * 256;
-        pim = im.get_pointer ();
-      }
-    }
-    for (int i = 0; i < vm_width * vm_height; i++)
-    {
-      if (*map != 0 || ! cfg.isBackDtmOn ())
-        *pim = (unsigned int) (red[*map] + green[*map] * 256
-                               + blue[*map] * 256 * 256);
-      pim++;
-      map++;
-    }
-    write_2D_png_color_image (im,
-      AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE + AmrelConfig::IM_SUFFIX);
-  }
-  else
-  {
-    Image2D<unsigned char> im (vm_width, vm_height);
-    unsigned char *pim = im.get_pointer ();
-    if (cfg.isBackDtmOn ())
-    {
-      if (dtm_in == NULL) loadTileSet (true, false);
-      if (dtm_in != NULL)
-      {
-        for (int j = 0; j < vm_height; j++)
-          for (int i = 0; i < vm_width; i++)
-            *pim++ = (unsigned char) (dtm_in->get (i, j));
-        pim = im.get_pointer ();
-      }
-    }
-    for (int i = 0; i < vm_width * vm_height; i++)
-    {
-      if (cfg.isColorInversion ())
-      {
-        if (*map == 0) *pim = (unsigned char) 255;
-      }
-      else 
-      {
-        if (*map != 0) *pim = (unsigned char) 255;
-      }
-      pim++;
-      map++;
-    }
-    write_2D_png_image (im,
-      AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE + AmrelConfig::IM_SUFFIX);
-  }
-*/
-  unsigned short *map = track_map;
-  if (map == NULL) return;
-
-  unsigned char *im = new unsigned char[vm_width * vm_height];
-  unsigned char *pim = im;
-
-    // Image2D<unsigned char> im (vm_width, vm_height);
-    // unsigned char *pim = im.get_pointer ();
-    if (cfg.isBackDtmOn ())
-    {
-      if (dtm_in == NULL) loadTileSet (true, false);
-      if (dtm_in != NULL)
-      {
-        for (int j = 0; j < vm_height; j++)
-          for (int i = 0; i < vm_width; i++)
-            *pim++ = (unsigned char) (dtm_in->get (i, j));
-        // pim = im.get_pointer ();
-        pim = im;
-      }
-    }
-    for (int i = 0; i < vm_width * vm_height; i++)
-    {
-      if (cfg.isColorInversion ())
-      {
-        if (*map == 0) *pim = (unsigned char) 255;
-      }
-      else 
-      {
-        if (*map != 0) *pim = (unsigned char) 255;
-      }
-      pim++;
-      map++;
-    }
-    //write_2D_png_image (im,
-    //  AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE + AmrelConfig::IM_SUFFIX);
-    std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
-                                             + AmrelConfig::IM_SUFFIX);
-    stbi_write_png (imname.c_str (), vm_width, vm_height, 1, im, 0);
-}
-
-
-int AmrelTool::countRoadPixels ()
-{
-/* TOPNG
-  Image2D<unsigned char> im
-    = read_2D_png_image<unsigned char> (
-        AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE + AmrelConfig::IM_SUFFIX);
-  int w = im.dimx (), h = im.dimy ();
-  unsigned char *pim = im.get_pointer ();
-  int nbi = 0, nbr = 0;
-  for (int j = 0; j < h; j ++)
-    for (int i = 0; i < w; i ++)
-    {
-      if (*pim++ > 100) nbr ++;
-//      if (*pim++ != 0) nbr ++;
-      nbi ++;
-    }
-  if (cfg.isVerboseOn ())
-    std::cout << "# road pixels = " << nbr << " / " << nbi << std::endl;
-  return nbr;
-*/
-  return 0;
-}
-
-
 void AmrelTool::exportRoads ()
 {
   if (road_sections.empty ()) return;
@@ -1555,4 +1271,669 @@ void AmrelTool::exportRoadCenters ()
     it ++;
   }
   SHPClose (hSHPHandle);
+}
+
+
+// DIFF AMREL STD/MULTI
+
+
+void AmrelTool::processRorpo (int rwidth, int rheight)
+{
+  if (cfg.isVerboseOn ())
+    std::cout << "No Rorpo, just transfering shaded map" << std::endl;
+  if (rorpo_map == NULL) rorpo_map = new unsigned char [vm_width * vm_height];
+  unsigned char *rmap = rorpo_map;
+  unsigned char *rdtm = dtm_map;
+  for (int i = 0 ; i < rheight * rwidth; i++) *rmap++ = *rdtm++;
+  if (cfg.isVerboseOn ()) std::cout << "Nothing done" << std::endl;
+}
+
+
+void AmrelTool::saveHillImage ()
+{
+  uint32_t alpha = (uint32_t) (256 * 256) * (uint32_t) (256 * 255);
+  uint32_t gray = (uint32_t) (256 * 256 + 257);
+  uint32_t *im = new uint32_t[vm_width * vm_height];
+  uint32_t *pim = im;
+  for (int j = 0; j < vm_height; j ++)
+    for (int i = 0; i < vm_width; i ++)
+    {
+      uint32_t val = dtm_in->get (i, j, TerrainMap::SHADE_HILL);
+      if (val > 255) val = 255;
+      else if (val < 0) val = 0;
+      *pim++ = alpha + gray * val;
+    }
+  std::string imname (AmrelConfig::RES_DIR + AmrelConfig::HILL_FILE
+                                           + AmrelConfig::IM_SUFFIX);
+  stbi_write_png (imname.c_str (), vm_width, vm_height, 4, im, 0);
+}
+
+
+void AmrelTool::saveShadingImage ()
+{
+  int shtype = (cfg.rorpoSkipped () ? TerrainMap::SHADE_EXP_SLOPE
+                                    : TerrainMap::SHADE_SLOPE);
+  uint32_t alpha = (uint32_t) (256 * 256) * (uint32_t) (256 * 255);
+  uint32_t gray = (uint32_t) (256 * 256 + 257);
+  uint32_t *im = new uint32_t[vm_width * vm_height];
+  uint32_t *pim = im;
+  for (int j = 0; j < vm_height; j ++)
+    for (int i = 0; i < vm_width; i ++)
+    {
+      uint32_t val = dtm_in->get (i, j, shtype);
+      if (val > 255) val = 255;
+      else if (val < 0) val = 0;
+      *pim++ = alpha + gray * val;
+    }
+  std::string imname (AmrelConfig::RES_DIR + AmrelConfig::SLOPE_FILE
+                                           + AmrelConfig::IM_SUFFIX);
+  stbi_write_png (imname.c_str (), vm_width, vm_height, 4, im, 0);
+}
+
+
+void AmrelTool::saveRorpoImage ()
+{
+/*
+  write_2D_png_image (*rorpo_map, AmrelConfig::RES_DIR
+                      + AmrelConfig::RORPO_FILE + AmrelConfig::IM_SUFFIX);
+*/
+}
+
+
+void AmrelTool::saveSobelImage ()
+{
+  uint32_t alpha = (uint32_t) (256 * 256) * (uint32_t) (256 * 255);
+  uint32_t gray = (uint32_t) (256 * 256 + 257);
+  uint32_t *im = new uint32_t[vm_width * vm_height];
+  uint32_t *pim = im;
+  int w = gmap->getWidth ();
+  int h = gmap->getHeight ();
+  double *gn = new double[w * h];
+  for (int j = 0; j < h; j++)
+    for (int i = 0; i < w; i++)
+      gn[j * w + i] = gmap->magn (i, j);
+  double min = gn[0];
+  double max = gn[0];
+  for (int i = 1; i < w * h; i++)
+  {
+    if (max < gn[i]) max = gn[i];
+    if (min > gn[i]) min = gn[i];
+  }
+  double norm = 255 / (max - min);
+  for (int j = 0; j < h; j++)
+    for (int i = 0; i < w; i++)
+      *pim++ = alpha + gray * (unsigned char) ((gn[j * w + i] - min) * norm);
+  std::string imname (AmrelConfig::RES_DIR + AmrelConfig::SOBEL_FILE
+                                           + AmrelConfig::IM_SUFFIX);
+  stbi_write_png (imname.c_str (), vm_width, vm_height, 4, im, 0);
+}
+
+
+void AmrelTool::saveFbsdImage (int im_w, int im_h)
+{
+  std::vector<BlurredSegment *> bss = bsdet.getBlurredSegments ();
+  if (bss.empty ()) return;
+
+  uint32_t alpha = (uint32_t) (256 * 256) * (uint32_t) (256 * 255);
+  uint32_t gray = (uint32_t) (256 * 256 + 257);
+  uint32_t white = alpha + 255 * gray;
+
+  if (cfg.isFalseColorOn ())
+  {
+    uint32_t *im = new uint32_t[im_w * im_h];
+    uint32_t *pim = im;
+    for (int i = 0; i < im_w * im_h; i++) *pim++ = white;
+    srand (time (NULL));
+
+    if (cfg.isBackDtmOn ())
+    {
+      if (dtm_in == NULL) loadTileSet (true, false);
+      if (dtm_in != NULL)
+      {
+        pim = im;
+        for (int j = 0; j < im_h; j++)
+          for (int i = 0; i < im_w; i++)
+            *pim++ = alpha + gray * (uint32_t) (dtm_in->get (i, j));
+      }
+    }
+
+    std::vector<BlurredSegment *>::iterator it = bss.begin ();
+    while (it != bss.end ())
+    {
+      bool nok = true;
+      int red = 0, green = 0, blue = 0;
+      while (nok)
+      {
+        red = rand () % 256;
+        green = rand () % 256;
+        blue = rand () % 256;
+        nok = ((red + green + blue) > 300);     // < 300 si fond noir
+      }
+      pim = im;
+      std::vector<Pt2i> pts = (*it)->getAllPoints ();
+      for (std::vector<Pt2i>::iterator pit = pts.begin ();
+           pit != pts.end (); pit ++)
+        *(pim + pit->y () * im_w + pit->x ())
+                  = alpha + (uint32_t) (red + green * 256 + blue * 256 * 256);
+      it ++;
+    }
+    std::string imname (AmrelConfig::RES_DIR + AmrelConfig::FBSD_FILE
+                                             + AmrelConfig::IM_SUFFIX);
+    stbi_write_png (imname.c_str (), im_w, im_h, 4, im, 0);
+  }
+  else
+  {
+    if (cfg.isBackDtmOn ())
+    {
+      uint32_t *im = new uint32_t[im_w * im_h];
+      uint32_t *pim = im;
+      for (int i = 0; i < im_w * im_h; i++) *pim++ = white;
+      if (dtm_in == NULL) loadTileSet (true, false);
+      if (dtm_in != NULL)
+      {
+        pim = im;
+        for (int j = 0; j < im_h; j++)
+          for (int i = 0; i < im_w; i++)
+            *pim++ = alpha + gray * (uint32_t) (dtm_in->get (i, j));
+      }
+
+      std::vector<BlurredSegment *>::iterator it = bss.begin ();
+      while (it != bss.end ())
+      {
+        pim = im;
+        std::vector<Pt2i> pts = (*it)->getAllPoints ();
+        for (std::vector<Pt2i>::iterator pit = pts.begin ();
+             pit != pts.end (); pit ++)
+          *(pim + pit->y () * im_w + pit->x ()) = alpha;
+        it ++;
+      }
+      std::string imname (AmrelConfig::RES_DIR + AmrelConfig::FBSD_FILE
+                                              + AmrelConfig::IM_SUFFIX);
+      stbi_write_png (imname.c_str (), im_w, im_h, 4, im, 0);
+    }
+    else
+    {
+      unsigned char *im = new unsigned char[im_w * im_h];
+      unsigned char *pim = im;
+      for (int i = 0; i < im_w * im_h; i++) *pim++ = (unsigned char) 255;
+      std::vector<BlurredSegment *>::iterator it = bss.begin ();
+      while (it != bss.end ())
+      {
+        pim = im;
+        std::vector<Pt2i> pts = (*it)->getAllPoints ();
+        for (std::vector<Pt2i>::iterator pit = pts.begin ();
+             pit != pts.end (); pit ++)
+          *(pim + pit->y () * im_w + pit->x ()) = (unsigned char) 0;
+        it ++;
+      }
+      std::string imname (AmrelConfig::RES_DIR + AmrelConfig::FBSD_FILE
+                                               + AmrelConfig::IM_SUFFIX);
+      stbi_write_png (imname.c_str (), im_w, im_h, 1, im, 0);
+    }
+  }
+}
+
+
+void AmrelTool::saveSeedsImage ()
+{
+  int i_w = vm_width, i_h = vm_height;
+  if (dtm_in != NULL)
+  {
+    i_w = dtm_in->tileWidth ();
+    i_h = dtm_in->tileHeight ();
+  }
+  if (cfg.isBackDtmOn ())
+  {
+    uint32_t alpha = (uint32_t) (256 * 256) * (uint32_t) (256 * 255);
+    uint32_t gray = (uint32_t) (256 * 256 + 257);
+    uint32_t white = alpha + 255 * gray;
+    uint32_t *im = new uint32_t[i_w * i_h];
+    uint32_t *pim = im;
+    for (int i = 0; i < i_w * i_h; i++) *pim++ = white;
+    if (cfg.isBackDtmOn ())
+    {
+      if (dtm_in == NULL) loadTileSet (true, false);
+      if (dtm_in != NULL)
+      {
+        pim = im;
+        for (int j = 0; j < i_h; j++)
+          for (int i = 0; i < i_w; i++)
+            *pim++ = alpha + gray * (uint32_t) dtm_in->get (i, j);
+      }
+    }
+
+    pim = im;
+    if (out_seeds != NULL)
+    {
+      std::vector<Pt2i>::iterator it;
+      int tsize = ptset->columnsOfTiles () * ptset->rowsOfTiles ();
+      for (int i = 0; i < tsize; i++)
+      {
+        it = out_seeds[i].begin ();
+        while (it != out_seeds[i].end ())
+        {
+          Pt2i pt1 = *it++;
+          Pt2i pt2 = *it++;
+          std::vector<Pt2i> line;
+          pt1.draw (line, pt2);
+          std::vector<Pt2i>::iterator pit = line.begin ();
+          while (pit != line.end ())
+          {
+            if (pit->x () >= 0 && pit->x () < i_w
+                && pit->y () >= 0 && pit->y () < i_h)
+              *(pim + (i_h - 1 - pit->y ()) * i_w + pit->x ()) = alpha;
+            pit ++;
+          }
+        }
+      }
+    }
+    std::string imname (AmrelConfig::RES_DIR + AmrelConfig::SEED_FILE
+                                             + AmrelConfig::IM_SUFFIX);
+    stbi_write_png (imname.c_str (), i_w, i_h, 4, im, 0);
+  }
+  else
+  {
+    unsigned char *im = new unsigned char[i_w * i_h];
+    unsigned char *pim = im;
+    for (int i = 0; i < i_w * i_h; i++) *pim++ = (unsigned char) 255;
+    pim = im;
+    if (out_seeds != NULL)
+    {
+      std::vector<Pt2i>::iterator it;
+      int tsize = ptset->columnsOfTiles () * ptset->rowsOfTiles ();
+      for (int i = 0; i < tsize; i++)
+      {
+        it = out_seeds[i].begin ();
+        while (it != out_seeds[i].end ())
+        {
+          Pt2i pt1 = *it++;
+          Pt2i pt2 = *it++;
+          std::vector<Pt2i> line;
+          pt1.draw (line, pt2);
+          std::vector<Pt2i>::iterator pit = line.begin ();
+          while (pit != line.end ())
+          {
+            if (pit->x () >= 0 && pit->x () < i_w
+                && pit->y () >= 0 && pit->y () < i_h)
+              *(pim + (i_h - 1 - pit->y ()) * i_w + pit->x ())
+                                                    = (unsigned char) 0;
+            pit ++;
+          }
+        }
+      }
+    }
+    std::string imname (AmrelConfig::RES_DIR + AmrelConfig::SEED_FILE
+                                             + AmrelConfig::IM_SUFFIX);
+    stbi_write_png (imname.c_str (), i_w, i_h, 1, im, 0);
+  }
+}
+
+
+void AmrelTool::saveAsdImage ()
+{
+  unsigned short *map = track_map;
+  if (map == NULL) return;
+
+  uint32_t alpha = (uint32_t) (256 * 256) * (uint32_t) (256 * 255);
+  uint32_t gray = (uint32_t) (256 * 256 + 257);
+  uint32_t white = alpha + 255 * gray;
+
+  if (cfg.isFalseColorOn ())
+  {
+    srand (time (NULL));
+    unsigned char *red = new unsigned char[count_of_roads + 1];
+    unsigned char *green = new unsigned char[count_of_roads + 1];
+    unsigned char *blue = new unsigned char[count_of_roads + 1];
+    red[0] = (unsigned char) 255;
+    green[0] = (unsigned char) 255;
+    blue[0] = (unsigned char) 255;
+    for (int i = 1; i <= count_of_roads; i ++)
+    {
+      bool nok = true;
+      while (nok)
+      {
+        red[i] = rand () % 256;
+        green[i] = rand () % 256;
+        blue[i] = rand () % 256;
+        nok = ((red[i] + green[i] + blue[i]) > 300);     // < 300 si fond noir
+      }
+    }
+
+    uint32_t *im = new uint32_t[vm_width * vm_height];
+    uint32_t *pim = im;
+    if (cfg.isBackDtmOn ())
+    {
+      if (dtm_in == NULL) loadTileSet (true, false);
+      if (dtm_in != NULL)
+      {
+        for (int j = 0; j < vm_height; j++)
+          for (int i = 0; i < vm_width; i++)
+          {
+            uint32_t val = dtm_in->get (i, j);
+            if (val > 255) val = 255;
+            else if (val < 0) val = 0;
+            *pim++ = alpha + val * gray;
+          }
+        pim = im;
+      }
+    }
+    for (int i = 0; i < vm_width * vm_height; i++)
+    {
+      if (*map != 0 || ! cfg.isBackDtmOn ())
+        *pim = alpha + (uint32_t) (red[*map] + green[*map] * 256
+                                   + blue[*map] * 256 * 256);
+      pim++;
+      map++;
+    }
+    std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
+                                             + AmrelConfig::IM_SUFFIX);
+    stbi_write_png (imname.c_str (), vm_width, vm_height, 4, im, 0);
+  }
+  else
+  {
+    if (cfg.isBackDtmOn ())
+    {
+      uint32_t *im = new uint32_t[vm_width * vm_height];
+      uint32_t *pim = im;
+      if (dtm_in == NULL) loadTileSet (true, false);
+      if (dtm_in != NULL)
+      {
+        for (int j = 0; j < vm_height; j++)
+          for (int i = 0; i < vm_width; i++)
+          {
+            uint32_t val = dtm_in->get (i, j);
+            if (val > 255) val = 255;
+            else if (val < 0) val = 0;
+            *pim++ = alpha + val * gray;
+          }
+        pim = im;
+      }
+      for (int i = 0; i < vm_width * vm_height; i++)
+      {
+        if (cfg.isColorInversion ())
+        {
+          if (*map == 0) *pim = white;
+        }
+        else 
+        {
+          if (*map != 0) *pim = white;
+        }
+        pim++;
+        map++;
+      }
+      std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
+                                               + AmrelConfig::IM_SUFFIX);
+      stbi_write_png (imname.c_str (), vm_width, vm_height, 4, im, 0);
+    }
+    else
+    {
+      unsigned char *im = new unsigned char[vm_width * vm_height];
+      unsigned char *pim = im;
+
+      for (int i = 0; i < vm_width * vm_height; i++)
+      {
+        if (cfg.isColorInversion ())
+        {
+          if (*map == 0) *pim = (unsigned char) 255;
+        }
+        else 
+        {
+          if (*map != 0) *pim = (unsigned char) 255;
+        }
+        pim++;
+        map++;
+      }
+      std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
+                                               + AmrelConfig::IM_SUFFIX);
+      stbi_write_png (imname.c_str (), vm_width, vm_height, 1, im, 0);
+    }
+  }
+}
+
+
+void AmrelTool::compareSeeds ()
+{
+  std::string name1 (AmrelConfig::RES_DIR + AmrelConfig::SEED_FILE
+                    + AmrelConfig::SEED_SUFFIX);
+  std::ifstream seeds_in1 (name1.c_str (), std::ios::in);
+  if (! seeds_in1)
+  {
+    std::cout << name1 << ": can't be opened" << std::endl;
+    return;
+  }
+  if (cfg.isVerboseOn ())
+    std::cout << "Loading seeds from " << name1 << std::endl;
+  int vw1 = 0, vh1 = 0, cs1 = 0;
+  int tsw1 = 1, tsh1 = 1, nb1 = 0;
+  seeds_in1.read ((char *) (&vw1), sizeof (int));
+  seeds_in1.read ((char *) (&vh1), sizeof (int));
+  seeds_in1.read ((char *) (&cs1), sizeof (float));
+  seeds_in1.read ((char *) (&tsw1), sizeof (int));
+  seeds_in1.read ((char *) (&tsh1), sizeof (int));
+  seeds_in1.read ((char *) (&nb1), sizeof (int));
+  Pt2i *pts1 = new Pt2i[nb1];
+  seeds_in1.read ((char *) pts1, nb1 * sizeof (Pt2i));
+  seeds_in1.close ();
+
+  std::string name2 (AmrelConfig::RES_DIR + std::string ("seedsASD")
+                    + AmrelConfig::SEED_SUFFIX);
+  std::ifstream seeds_in2 (name2.c_str (), std::ios::in);
+  if (! seeds_in2)
+  {
+    std::cout << name2 << ": can't be opened" << std::endl;
+    return;
+  }
+  if (cfg.isVerboseOn ())
+    std::cout << "Loading seeds from " << name2 << std::endl;
+  int vw2 = 0, vh2 = 0, cs2 = 0;
+  int tsw2 = 1, tsh2 = 1, nb2 = 0;
+  seeds_in2.read ((char *) (&vw2), sizeof (int));
+  seeds_in2.read ((char *) (&vh2), sizeof (int));
+  seeds_in2.read ((char *) (&cs2), sizeof (float));
+  seeds_in2.read ((char *) (&tsw2), sizeof (int));
+  seeds_in2.read ((char *) (&tsh2), sizeof (int));
+  seeds_in2.read ((char *) (&nb2), sizeof (int));
+  Pt2i *pts2 = new Pt2i[nb2];
+  seeds_in2.read ((char *) pts2, nb2 * sizeof (Pt2i));
+  seeds_in2.close ();
+
+  if (vw1 != vw2 || vh1 != vh2 || cs1 != cs2
+      || tsw1 != tsw2 || tsh1 != tsh2 || nb1 != nb2)
+  {
+    if (nb1 != nb2) std::cout << "Care: nb1 = " << nb1 << " and nb2 = "
+                              << nb2 << std::endl;
+    else std::cout << "Different features" << std::endl;
+  }
+  else
+  {
+    Pt2i *s1 = pts1;
+    Pt2i *s2 = pts2;
+    int nbdif = 0;
+    for (int i = 0; i < nb1; i++)
+    {
+      if (s1->x () != s2->x () || s1->y () != s2->y ()) nbdif ++;
+      s1 ++;
+      s2 ++;
+    }
+    std::cout << "Diif = " << nbdif << " / " << nb1 << std::endl;
+  }
+  delete [] pts2;
+  delete [] pts1;
+}
+
+
+void AmrelTool::compareMaps ()
+{
+  std::string name1 (AmrelConfig::RES_DIR + AmrelConfig::SOBEL_FILE
+                    + AmrelConfig::MAP_SUFFIX);
+  std::ifstream shading_in (name1.c_str (), std::ios::in);
+  if (! shading_in)
+  {
+    std::cout << name1 << ": can't be opened" << std::endl;
+    return;
+  }
+  shading_in.read ((char *) (&vm_width), sizeof (int));
+  shading_in.read ((char *) (&vm_height), sizeof (int));
+  shading_in.read ((char *) (&csize), sizeof (float));
+  Vr2i *dtm_map1 = new Vr2i[vm_width * vm_height];
+  Vr2i *im = dtm_map1;
+  shading_in.read ((char *) im, vm_width * vm_height * sizeof (Vr2i));
+  shading_in.close ();
+
+  std::string name2 (AmrelConfig::RES_DIR + std::string ("sobelASD")
+                    + AmrelConfig::MAP_SUFFIX);
+  std::ifstream shading_in2 (name2.c_str (), std::ios::in);
+  if (! shading_in2)
+  {
+    std::cout << name2 << ": can't be opened" << std::endl;
+    return;
+  }
+  shading_in2.read ((char *) (&vm_width), sizeof (int));
+  shading_in2.read ((char *) (&vm_height), sizeof (int));
+  shading_in2.read ((char *) (&csize), sizeof (float));
+  Vr2i *dtm_map2 = new Vr2i[vm_width * vm_height];
+  im = dtm_map2;
+  shading_in2.read ((char *) im, vm_width * vm_height * sizeof (Vr2i));
+  shading_in2.close ();
+
+  Vr2i *pim1 = dtm_map1;
+  Vr2i *pim2 = dtm_map2;
+  int diff = 0;
+  for (int i = 0; i < vm_width * vm_height; i ++)
+  {
+    if (pim1->x () != pim2->x () || pim1->y () != pim2->y ())
+    {
+      diff ++;
+      //std::cout << "Pixel " << i << std::endl;
+    }
+    pim1 ++;
+    pim2 ++;
+  }
+  std::cout << "Diff = " << diff << std::endl;
+
+  delete [] dtm_map2;
+  delete [] dtm_map1;
+}
+
+
+void AmrelTool::compareRoads ()
+{
+  int iw1 = 0, ih1 = 0, ich1 = 0;
+  std::string imname1 (AmrelConfig::RES_DIR + std::string ("roadsMulti")
+                                            + AmrelConfig::IM_SUFFIX);
+  unsigned char *im1
+    = (unsigned char *) stbi_load (imname1.c_str (), &iw1, &ih1, &ich1, 1);
+  if (im1 == NULL || iw1 <= 0 || ih1 <= 0 || ich1 != 1)
+  {
+    if (cfg.isVerboseOn ())
+      if (im1 == NULL) std::cout << "Wrong file " << imname1 << std::endl;
+    else
+    {
+      if (iw1 <= 0 || ih1 <= 0) std::cout << imname1 << ": wrong size "
+                                        << iw1 << " x " << ih1 << std::endl;
+      if (ich1 != 1) std::cout << imname1 << ": wrong format "
+                                        << ich1 << " channels" << std::endl;
+    }
+    return;
+  }
+
+  int iw2 = 0, ih2 = 0, ich2 = 0;
+  std::string imname2 (AmrelConfig::RES_DIR + std::string ("roadsASD")
+                                            + AmrelConfig::IM_SUFFIX);
+  unsigned char *im2
+    = (unsigned char *) stbi_load (imname2.c_str (), &iw2, &ih2, &ich2, 1);
+  if (im2 == NULL || iw2 <= 0 || ih2 <= 0 || ich2 != 1)
+  {
+    if (cfg.isVerboseOn ())
+      if (im2 == NULL) std::cout << "Wrong file " << imname2 << std::endl;
+    else
+    {
+      if (iw2 <= 0 || ih2 <= 0) std::cout << imname2 << ": wrong size "
+                                        << iw2 << " x " << ih2 << std::endl;
+      if (ich2 != 1) std::cout << imname2 << ": wrong format "
+                                        << ich2 << " channels" << std::endl;
+    }
+    return;
+  }
+
+  unsigned char *pim = im1;
+  int nbi1 = 0, nbr1 = 0;
+  for (int i = 0; i < ih1 * iw1; i ++)
+  {
+    if (*pim++ > 100) nbr1 ++;
+    // if (*pim++ != 0) nbr1 ++;
+    nbi1 ++;
+  }
+  if (cfg.isVerboseOn ())
+    std::cout << "# multi pixels = " << nbr1 << " / " << nbi1 << std::endl;
+
+  pim = im2;
+  int nbi2 = 0, nbr2 = 0;
+  for (int i = 0; i < ih2 * iw2; i ++)
+  {
+    if (*pim++ > 100) nbr2 ++;
+    // if (*pim++ != 0) nbr2 ++;
+    nbi2 ++;
+  }
+  if (cfg.isVerboseOn ())
+    std::cout << "# rdASD pixels = " << nbr2 << " / " << nbi2 << std::endl;
+
+  unsigned char *idiff = new unsigned char[iw1 * ih1];
+  unsigned char *pim1 = im1;
+  unsigned char *pim2 = im2;
+  pim = idiff;
+  int idif = 0;
+  for (int i = 0; i < ih2 * iw2; i ++)
+  {
+    if (*pim1++ != *pim2++)
+    {
+      *pim = (unsigned char) 255;
+      std::cout << "Pixel " << i << std::endl;
+      idif ++;
+    }
+    else *pim = (unsigned char) 0;
+    pim ++;
+  }
+  std::cout << idif << " pixels differents" << std::endl;
+  std::string imname (AmrelConfig::RES_DIR + std::string ("roadsDiff")
+                                           + AmrelConfig::IM_SUFFIX);
+  stbi_write_png (imname.c_str (), iw1, ih1, 1, idiff, 0);
+
+  delete [] im1;
+  delete [] im2;
+}
+
+
+int AmrelTool::countRoadPixels ()
+{
+  int iw = 0, ih = 0, ich = 0;
+  std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
+                                           + AmrelConfig::IM_SUFFIX);
+  unsigned char *im
+    = (unsigned char *) stbi_load (imname.c_str (), &iw, &ih, &ich, 1);
+  if (im == NULL || iw <= 0 || ih <= 0 || ich != 1)
+  {
+    if (cfg.isVerboseOn ())
+      if (im == NULL) std::cout << "Wrong file " << imname << std::endl;
+    else
+    {
+      if (iw <= 0 || ih <= 0) std::cout << imname << ": wrong size "
+                                        << iw << " x " << ih << std::endl;
+      if (ich != 1) std::cout << imname << ": wrong format "
+                                        << ich << " channels" << std::endl;
+    }
+    return -1;
+  }
+  unsigned char *pim = im;
+  int nbi = 0, nbr = 0;
+  for (int i = 0; i < ih * iw; i ++)
+  {
+    if (*pim++ > 100) nbr ++;
+//    if (*pim++ != 0) nbr ++;
+    nbi ++;
+  }
+  if (cfg.isVerboseOn ())
+    std::cout << "# road pixels = " << nbr << " / " << nbi << std::endl;
+  delete [] im;
+  return nbr;
 }

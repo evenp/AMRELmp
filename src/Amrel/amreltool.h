@@ -86,7 +86,7 @@ public:
   /**
    * Releases Rorpo map.
    */
-  //void clearRorpo ();
+  void clearRorpo ();
 
   /**
    * Releases Sobel map.
@@ -164,8 +164,10 @@ public:
 
   /**
    * Detects roads on loaded image : step 2 = RORPO image filtering.
+   * @param rwidth Width of Rorpo image.
+   * @param rheight Height of Rorpo image.
    */
-  //void processRorpo ();
+  void processRorpo (int rwidth, int rheight);
 
   /**
    * Detects roads on loaded image : step 3 = Sobel gradient map construction.
@@ -206,6 +208,16 @@ public:
    * Loads DTM shaded map from steps/shade.map file to run RORPO.
    */
   bool loadShadingMap ();
+
+  /**
+   * Saves Rorpo map in steps/rorpo.map file.
+   */
+  bool saveRorpoMap ();
+
+  /**
+   * Loads Rorpo map from steps/rorpo.map file to run Sobel and FBSD.
+   */
+  bool loadRorpoMap ();
 
   /**
    * Saves gradient map in steps/sobel.map file.
@@ -258,6 +270,11 @@ public:
   void saveShadingImage ();
 
   /**
+   * Displays RORPO output in steps/rorpo.png file.
+   */
+  void saveRorpoImage ();
+
+  /**
    * Displays gradient magnitude in steps/sobel.png file.
    */
   void saveSobelImage ();
@@ -294,6 +311,10 @@ public:
    */
   void exportRoadCenters ();
 
+void compareSeeds ();
+void compareMaps ();
+void compareRoads ();
+
 
 private:
 
@@ -323,6 +344,8 @@ private:
   TerrainMap *dtm_in;
   /** Shaded DTM image. */
   unsigned char *dtm_map;
+  /** Rorpo output image. */
+  unsigned char *rorpo_map;
   /** Successful seeds saving modality. */
   bool save_seeds;
 

@@ -127,8 +127,8 @@ public:
   ~AmrelConfig ();
 
   /**
-   * \brief Sets the carriage track detector.
-   * Returns te file was correctly read.
+   * \brief Interprets the configuration file.
+   * Returns whether the file was correctly read.
    */
   bool readConfig ();
 

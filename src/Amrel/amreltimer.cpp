@@ -60,8 +60,8 @@ void AmrelTimer::run ()
       sawingTest ();
     else if (amrel->config()->step () == AmrelConfig::STEP_SHADE)
       shadingTest ();
-    // else if (amrel->config()->step () == AmrelConfig::STEP_RORPO)
-    //   rorpoTest ();
+    else if (amrel->config()->step () == AmrelConfig::STEP_RORPO)
+      rorpoTest ();
     else if (amrel->config()->step () == AmrelConfig::STEP_SOBEL)
       sobelTest ();
     else if (amrel->config()->step () == AmrelConfig::STEP_FBSD)
@@ -133,34 +133,36 @@ void AmrelTimer::performanceTest (bool with_load)
     }
     amrel->processShading ();
     if (with_load) amrel->clearDtm ();
+    std::chrono::high_resolution_clock::time_point t1;
+    std::chrono::duration<double> time_span;
     std::chrono::high_resolution_clock::time_point t0
          = std::chrono::high_resolution_clock::now ();
 
-    /*
     // Rorpo step
-    amrel->processRorpo ();
-    amrel->clearShading ();
-    std::chrono::high_resolution_clock::time_point t1
-         = std::chrono::high_resolution_clock::now ();
-    std::chrono::duration<double> time_span
-         = std::chrono::duration_cast<std::chrono::duration<double>> (
-             t1 - t0);
-    m_rorpo += time_span.count ();
-    std::cout << "Rorpo: " << time_span.count () << " s" << std::endl;
-    */
+    if (! amrel->config()->rorpoSkipped ())
+    {
+      amrel->processRorpo (amrel->vmWidth (), amrel->vmHeight ());
+      amrel->clearShading ();
+      t1 = std::chrono::high_resolution_clock::now ();
+      time_span
+        = std::chrono::duration_cast<std::chrono::duration<double>> (t1 - t0);
+      m_rorpo += time_span.count ();
+      std::cout << "Rorpo: " << time_span.count () << " s" << std::endl;
+    }
 
     // FBSD step
     amrel->processSobel (amrel->vmWidth (), amrel->vmHeight ());
-    // amrel->clearRorpo ();
-    amrel->clearShading (); // Added
+    if (amrel->config()->rorpoSkipped ()) amrel->clearShading ();
+    else amrel->clearRorpo ();
     amrel->processFbsd ();
     amrel->clearSobel ();
     amrel->processSeeds ();
     amrel->clearFbsd ();
     std::chrono::high_resolution_clock::time_point t2
          = std::chrono::high_resolution_clock::now ();
-    std::chrono::duration<double> time_span
-         = std::chrono::duration_cast<std::chrono::duration<double>> (t2 - t0);
+    time_span = (amrel->config()->rorpoSkipped () ?
+         std::chrono::duration_cast<std::chrono::duration<double>> (t2 - t0) :
+         std::chrono::duration_cast<std::chrono::duration<double>> (t2 - t1));
     m_fbsd += time_span.count ();
     std::cout << "Fbsd: " << time_span.count () << " s" << std::endl;
 
@@ -280,7 +282,6 @@ void AmrelTimer::shadingTest ()
 }
 
 
-/*
 void AmrelTimer::rorpoTest ()
 {
   if (! amrel->loadShadingMap ())
@@ -292,7 +293,7 @@ void AmrelTimer::rorpoTest ()
   std::chrono::high_resolution_clock::time_point start
         = std::chrono::high_resolution_clock::now ();
   for (int i = 0; i < test_count; i++)
-    amrel->processRorpo ();
+    amrel->processRorpo (amrel->vmWidth (), amrel->vmHeight ());
   std::chrono::high_resolution_clock::time_point end
         = std::chrono::high_resolution_clock::now ();
   std::chrono::duration<double> time_span
@@ -308,16 +309,25 @@ void AmrelTimer::rorpoTest ()
     amrel->clearShading ();
   }
 }
-*/
 
 
 void AmrelTimer::sobelTest ()
 {
-  // if (! amrel->loadRorpoMap ())
-  if (! amrel->loadShadingMap ()) // Added
+  if (amrel->config()->rorpoSkipped ())
   {
-    std::cout << "Sobel : shading map loading failed" << std::endl;
-    return;
+    if (! amrel->loadShadingMap ())
+    {
+      std::cout << "Sobel : shading map loading failed" << std::endl;
+      return;
+    }
+  }
+  else
+  {
+    if (! amrel->loadRorpoMap ())
+    {
+      std::cout << "Sobel : rorpo map loading failed" << std::endl;
+      return;
+    }
   }
   std::cout << "Time perf for Sobel..." << std::endl;
   std::chrono::high_resolution_clock::time_point start
@@ -339,8 +349,8 @@ void AmrelTimer::sobelTest ()
   else
   {
     if (amrel->config()->isOutMapOn ()) amrel->saveSobelImage ();
-    // amrel->clearRorpo ();
-    amrel->clearShading (); // Added
+    if (amrel->config()->rorpoSkipped ()) amrel->clearShading ();
+    else amrel->clearRorpo ();
   }
 }
 

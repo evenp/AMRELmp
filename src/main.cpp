@@ -31,7 +31,8 @@ int main (int argc, char *argv[])
 {
   AmrelTool autodet;
 
-  autodet.config()->readConfig ();
+  if (! autodet.config()->readConfig ()) return 0;
+  autodet.config()->skipRorpo ();
 
   for (int i = 1; i < argc; i++)
   {

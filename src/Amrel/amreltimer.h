@@ -108,7 +108,7 @@ public:
   /**
    * Runs detection performance on RORPO step.
    */
-  // void rorpoTest ();
+  void rorpoTest ();
 
   /**
    * Runs detection performance on Sobel step.

@@ -27,7 +27,7 @@
 #include "terrainmap.h"
 
 
-const std::string AmrelConfig::VERSION = "1.3.1";
+const std::string AmrelConfig::VERSION = "1.3.2";
 
 const int AmrelConfig::DTM_GRID_SUBDIVISION_FACTOR = 5;
 const int AmrelConfig::STEP_ALL = 0;
@@ -112,7 +112,7 @@ AmrelConfig::AmrelConfig ()
   char cfg_param[100];
   bool reading = true;
   std::ifstream input (CONFIG_FILE + INI_SUFFIX, std::ios::in);
-  if (input)
+  if (input.is_open ())
   {
     while (reading)
     {
@@ -201,6 +201,20 @@ bool AmrelConfig::readConfig ()
           input >> text;
           if (std::string (text) == "yes") setNewLidarOn ();
         }
+        else if (titre == "DtmDir")
+        {
+          input >> text;
+          if (input.eof ()) reading = false;
+          else if (std::string (text) != "local")
+            setDtmDir (std::string (text));
+        }
+        else if (titre == "PointDir")
+        {
+          input >> text;
+          if (input.eof ()) reading = false;
+          else if (std::string (text) != "local")
+            setXyzDir (std::string (text));
+        }
         else if (titre == "TileSet")
         {
           input >> text;
@@ -212,6 +226,47 @@ bool AmrelConfig::readConfig ()
               std::cout << "Unknown " << text << std::endl;
               return false;
             }
+          }
+        }
+        else if (titre == "CloudAccess")
+        {
+          input >> text;
+          if (input.eof ()) reading = false;
+          else
+          {
+            std::string amacc (text);
+            if (amacc == "eco") setCloudAccess (IPtTile::ECO);
+            else if (amacc == "mid") setCloudAccess (IPtTile::MID);
+            else if (amacc == "top") setCloudAccess (IPtTile::TOP);
+            else
+            {
+              std::cout << "Unknown access " << text << std::endl;
+              return false;
+            }
+          }
+        }
+        else if (titre == "SawingPadSize")
+        {
+          input >> text;
+          int val = atoi (text);
+          if (input.eof ()) reading = false;
+          else if (val > 0 && val % 2 == 1) setPadSize (val);
+          else if (val != 0)
+          {
+            std::cout << "Refused pad size " << val << std::endl;
+            return false;
+          }
+        }
+        else if (titre == "AsdBufferSize")
+        {
+          input >> text;
+          int val = atoi (text);
+          if (input.eof ()) reading = false;
+          else if (val > 0 && val % 2 == 1) setBufferSize (val);
+          else if (val != 0)
+          {
+            std::cout << "Refused buffer size " << val << std::endl;
+            return false;
           }
         }
         else if (titre == "AmrelStep")
@@ -236,28 +291,51 @@ bool AmrelConfig::readConfig ()
             }
           }
         }
-        else if (titre == "CloudAccess")
+        else if (titre == "OutputImage")
         {
           input >> text;
           if (input.eof ()) reading = false;
           else
           {
-            std::string amacc (text);
-            if (amacc == "eco") setCloudAccess (IPtTile::ECO);
-            else if (amacc == "mid") setCloudAccess (IPtTile::MID);
-            else if (amacc == "top") setCloudAccess (IPtTile::TOP);
-            else
-            {
-              std::cout << "Unknown access " << text << std::endl;
-              return false;
-            }
+            std::string amstep (text);
+            if (amstep == "yes") setOutMap (true);
+          }
+        }
+        else if (titre == "ColorImage")
+        {
+          input >> text;
+          if (input.eof ()) reading = false;
+          else
+          {
+            std::string amstep (text);
+            if (amstep == "yes") setFalseColor (true);
+          }
+        }
+        else if (titre == "DtmBack")
+        {
+          input >> text;
+          if (input.eof ()) reading = false;
+          else
+          {
+            std::string amstep (text);
+            if (amstep == "yes") setBackDtm (true);
+          }
+        }
+        else if (titre == "BlackRoads")
+        {
+          input >> text;
+          if (input.eof ()) reading = false;
+          else
+          {
+            std::string amstep (text);
+            if (amstep == "yes") setColorInversion (true);
           }
         }
       }
     }
     input.close ();
   }
-  else std::cout << "not found" << std::endl;
+  else std::cout << "No AMREL.ini file found" << std::endl;
   return true;
 }
 
@@ -596,90 +674,6 @@ void AmrelConfig::setImportFile (const std::string &name)
 }
 
 
-bool AmrelConfig::importAllDtmFiles ()
-{
-  TerrainMap tm;
-  std::vector<std::string> dtms;
-  for (const std::filesystem::directory_entry& elem :
-       std::filesystem::directory_iterator (DTM_DEFAULT_DIR.c_str ()))
-    dtms.push_back (std::string ("") + elem.path().u8string().c_str ());
-
-  int dirl = DTM_DEFAULT_DIR.length ();
-  std::vector<std::string>::iterator it = dtms.end ();
-  do
-  {
-    it --;
-    if (! tm.addDtmFile (*it))
-    {
-      std::cout << "Loading of " << (*it) << " failed" << std::endl;
-      return false;
-    }
-    tm.addDtmName (it->substr (dirl, it->find_last_of ('.') - dirl));
-  }
-  while (it != dtms.begin ());
-
-  if (! tm.createMapFromDtm ())
-  {
-    std::cout << "Tile set assembling failed" << std::endl;
-    return false;
-  }
-
-  tm.saveLoadedNormalMaps (NVM_DEFAULT_DIR);
-  if (verbose) std::cout << "Saved new NVM files" << std::endl;
-
-  std::string prefix;
-  if (cloud_access == IPtTile::TOP) prefix += std::string ("top/top_");
-  else if (cloud_access == IPtTile::MID) prefix += std::string ("mid/mid_");
-  else if (cloud_access == IPtTile::ECO) prefix += std::string ("eco/eco_");
-
-  double dtmx = tm.xMin ();
-  double dtmy = tm.yMin ();
-  double dtmw = tm.tileWidth () * (double) tm.cellSize ();
-  double dtmh = tm.tileHeight () * (double) tm.cellSize ();
-  dirl = PTS_DEFAULT_DIR.length ();
-  for (const std::filesystem::directory_entry& elem :
-       std::filesystem::directory_iterator (PTS_DEFAULT_DIR.c_str ()))
-  {
-    std::string xyzname (elem.path().u8string().c_str ());
-
-    IPtTile tile ((tm.tileHeight () * DTM_GRID_SUBDIVISION_FACTOR)
-                  / cloud_access,
-                  (tm.tileWidth () * DTM_GRID_SUBDIVISION_FACTOR)
-                  / cloud_access);
-    Pt2i layout (tile.findLayout (xyzname, dtmx, dtmy, dtmw, dtmh));
-    if (layout.x () < 0 || layout.y () < 0)
-    {
-      std::cout << "Can't guess layout of " << xyzname << std::endl;
-      return false;
-    }
-    double txmin = 0.;
-    double tymin = 0.;
-    std::string tname;
-    if (! tm.getLayoutInfo (tname, txmin, tymin, layout))
-    {
-      std::cout << "DTM tile (" << layout.x () << ", " << layout.y ()
-                << ") not available" << std::endl;
-      return false;
-    }
-    tile.setArea ((int64_t) (txmin * IPtTile::XYZ_UNIT + 0.5f),
-                  (int64_t) (tymin * IPtTile::XYZ_UNIT + 0.5f),
-                  (int64_t) 0,
-                  (int) ((tm.cellSize () * IPtTile::XYZ_UNIT * cloud_access)
-                         / DTM_GRID_SUBDIVISION_FACTOR + 0.5));
-    if (! tile.loadXYZFile (xyzname, cloud_access))
-    {
-      std::cout << "Can't read " << xyzname << " file" << std::endl;
-      return false;
-    }
-
-    std::string sname (TIL_DEFAULT_DIR + prefix + tname + std::string (".til"));
-    tile.save (sname);
-    if (verbose) std::cout << "Saved " << sname << " file" << std::endl;
-  }
-  return true;
-}
-
-
 bool AmrelConfig::importDtm ()
 {
   TerrainMap tm;
@@ -889,4 +883,91 @@ bool AmrelConfig::createAltXyz (const std::string &name)
     }
     return false;
   }
+}
+
+
+// DIFF AMREL STD/MULTI
+
+
+bool AmrelConfig::importAllDtmFiles ()
+{
+  TerrainMap tm;
+  std::vector<std::string> dtms;
+  for (const std::filesystem::directory_entry& elem :
+       std::filesystem::directory_iterator (dtm_dir.c_str ()))
+    dtms.push_back (std::string ("") + elem.path().u8string().c_str ());
+
+  int dirl = dtm_dir.length ();
+  std::vector<std::string>::iterator it = dtms.end ();
+  do
+  {
+    it --;
+    if (! tm.addDtmFile (*it))
+    {
+      std::cout << "Loading of " << (*it) << " failed" << std::endl;
+      return false;
+    }
+    tm.addDtmName (it->substr (dirl, it->find_last_of ('.') - dirl));
+  }
+  while (it != dtms.begin ());
+
+  if (! tm.createMapFromDtm ())
+  {
+    std::cout << "Tile set assembling failed" << std::endl;
+    return false;
+  }
+
+  tm.saveLoadedNormalMaps (nvm_dir);
+  if (verbose) std::cout << "Saved new NVM files" << std::endl;
+
+  std::string prefix;
+  if (cloud_access == IPtTile::TOP) prefix += std::string ("top/top_");
+  else if (cloud_access == IPtTile::MID) prefix += std::string ("mid/mid_");
+  else if (cloud_access == IPtTile::ECO) prefix += std::string ("eco/eco_");
+
+  double dtmx = tm.xMin ();
+  double dtmy = tm.yMin ();
+  double dtmw = tm.tileWidth () * (double) tm.cellSize ();
+  double dtmh = tm.tileHeight () * (double) tm.cellSize ();
+  dirl = xyz_dir.length ();
+  for (const std::filesystem::directory_entry& elem :
+       std::filesystem::directory_iterator (xyz_dir.c_str ()))
+  {
+    std::string xyzname (elem.path().u8string().c_str ());
+
+    IPtTile tile ((tm.tileHeight () * DTM_GRID_SUBDIVISION_FACTOR)
+                  / cloud_access,
+                  (tm.tileWidth () * DTM_GRID_SUBDIVISION_FACTOR)
+                  / cloud_access);
+    Pt2i layout (tile.findLayout (xyzname, dtmx, dtmy, dtmw, dtmh));
+    if (layout.x () < 0 || layout.y () < 0)
+    {
+      std::cout << "Can't guess layout of " << xyzname << std::endl;
+      return false;
+    }
+    double txmin = 0.;
+    double tymin = 0.;
+    std::string tname;
+    if (! tm.getLayoutInfo (tname, txmin, tymin, layout))
+    {
+      std::cout << "DTM tile (" << layout.x () << ", " << layout.y ()
+                << ") not available" << std::endl;
+      return false;
+    }
+    tile.setArea ((int64_t) (txmin * IPtTile::XYZ_UNIT + 0.5f),
+                  (int64_t) (tymin * IPtTile::XYZ_UNIT + 0.5f),
+                  (int64_t) 0,
+                  (int) ((tm.cellSize () * IPtTile::XYZ_UNIT * cloud_access)
+                         / DTM_GRID_SUBDIVISION_FACTOR + 0.5));
+    if (! tile.loadXYZFile (xyzname, cloud_access))
+    {
+      std::cout << "Can't read " << xyzname << " file" << std::endl;
+      return false;
+    }
+
+    std::string sname (til_dir + prefix + tname + std::string (".til"));
+    tile.save (sname);
+    if (verbose) std::cout << "Saved " << sname << " file" << std::endl;
+  }
+  return true;
 }

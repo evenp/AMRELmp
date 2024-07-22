@@ -71,9 +71,9 @@ that contains several options:
 
 When set to `yes`, AMREL only transforms LiDAR inputs into internal NVM
 and TIL formats.
-It reads ASCII-formatted DTM maps (.asc files) found in the `resources/asc`
-directory, then XYZ-formatted ground point tiles (.xyz files) found in the
-`resources/xyz` directory.
+It reads ASCII-formatted DTM maps (.asc files) found by default in the
+`resources/asc` directory, then XYZ-formatted ground point tiles (.xyz files)
+found by default in the `resources/xyz` directory.
 Caution: DTM and point tiles must share the same area.
 Mostly 500 m x 500 m wide tiles have been tested.
 Ascii headers should contain `ncols`, `nrows`, `xllcenter`, `yllcenter`,
@@ -110,9 +110,76 @@ This option sets the access speed to the points stored into the TIL files:
 'top' is fast, but consumes a huge memory size to store the index table;
 'eco' uses much less memory, but is quite slower;
 'mid' is a good compromise (recommended).
-Actually, it should match the point cloud density.
+In practice, it should match the point cloud density.
 
-Other options will soon be provided for a better control of the extraction.
+### SawingPadSize
+
+This option sets the size of the groups of DTM tiles, that are iterately
+processed to select seeds. It is recommended when processing large LiDARs
+to avoid memory saturation. A pad size of 7 can be considered as a good
+compromise between required memory and execution time.
+
+When set to 0, all the tiles are processed at a single stage.
+
+### AsdBufferSize
+
+This option sets the size of the groups of point tiles, that are iterately
+processed to extract roads. It is recommended when processing large LiDARs
+to avoid memory saturation. A pad size of 5 can be considered as a good
+compromise between required memory and execution time.
+
+When set to 0, all the tiles are processed at a single stage.
+
+### AmrelStep
+
+When set to 'all' (the default), both seed selection and road extraction
+steps are run sequentially. It is possible to run each step separately,
+provided that their required input is available.
+
+When set to 'sawing', only the seed selection step is processed.
+
+When set to 'asd', only the road extraction step is processed.
+
+It is also possible to process separately the sub-steps of the seed
+selection steps to check the produced outputs:
+
+* production of a slope-shaded map ('shade'),
+* Sobel filtering to get gradient maps ('sobel'),
+* straight edge extraction using FBSD tool ('fbsd'),
+* disposition of seeds along the longest edges ('seeds').
+
+### OutputImage
+
+When set to 'yes', this option produces a PNG image of the last processed step.
+The image is stored into the 'resources/steps' directory.
+
+### ColorImage
+
+By default, gray-level PNG images are output. When set to 'yes', this option
+assigns a distinct color to each element of the output set when possible
+(for instance to each extracted road section).
+
+### DtmBack
+
+When set to 'yes', this option displays the hill-shaded DTM in the output
+PNG image background.
+
+### BlackRoads
+
+In the output PNG image, white roads are drawn over a black background.
+When set to 'yes', this option draws black roads on a white background.
+
+### DtmDir
+
+This option can be used to specify the directory containing input
+ASCII-formatted DTM files. An absolute path should be provided.
+
+### PointDir
+
+This option can be used to specify the directory containing input
+XYZ-formatted point files. An absolute path should be provided.
+
+## OTHER CONTROL MODE
 
 A Unix-style command line mode is also provided. Arguments are described
 in [AMREL GitHub repository](https::github.com/evenp/AMREL) README file.
