@@ -216,7 +216,8 @@ void AmrelTimer::allStepsTest ()
   {
     bool ok = amrel->processSawing ();
     if (ok) ok = amrel->processAsd ();
-    if (ok) amrel->saveAsdImage ();
+    if (ok) amrel->saveAsdImage (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
+                                                      + AmrelConfig::IM_SUFFIX);
     else
     {
       std::cout << "Run " << (i + 1) << " : process failed" << std::endl;
@@ -455,5 +456,6 @@ void AmrelTimer::asdTest ()
             end - start);
   std::cout << "Asd: timing for " << test_count << " run = "
             << time_span.count () << " s" << std::endl;
-  amrel->saveAsdImage ();
+  amrel->saveAsdImage (AmrelConfig::RES_DIR
+                       + AmrelConfig::ROAD_FILE + AmrelConfig::IM_SUFFIX);
 }

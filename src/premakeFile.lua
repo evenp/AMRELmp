@@ -56,6 +56,5 @@ project "AMREL"
 	includedirs(SrcDir.."/DirectionalScanner")
 	includedirs(SrcDir.."/ImageTools")
 	includedirs(SrcDir.."/PointCloud")
-	includedirs(SrcDir.."/RORPO2D")
 	includeShapeLib()
 	includeStbi()

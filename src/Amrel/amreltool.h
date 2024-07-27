@@ -26,6 +26,10 @@
 #include "vmap.h"
 #include "bsdetector.h"
 #include "amrelconfig.h"
+#include "amrelmap.h"
+/* SPEC AMRELnet
+#include "image.hpp"
+// FIN SPEC */
 
 
 /** 
@@ -292,9 +296,18 @@ public:
   void saveSeedsImage ();
 
   /**
-   * Displays extracted roads in steps/roads.png image.
+   * Displays extracted roads in a PNG image.
+   * @param name Road detection image name.
    */
-  void saveAsdImage ();
+  void saveAsdImage (std::string name);
+
+  /**
+   * Displays extracted roads in PNG image file.
+   * @param name Image file name.
+   * @param colorOn False color modality status.
+   * @param bg Reference to a DTM map as background.
+   */
+  void saveAsdImage (std::string name, bool colorOn, TerrainMap *bg);
 
   /**
    * Returns the number of road pixels on result PNG map.
@@ -335,8 +348,6 @@ private:
   bool tile_loaded;
   /** Flag indicating if tile set buffers are already created. */
   bool buf_created;
-  /** Map of detected roads. */
-  unsigned short *track_map;
   /** Image to meter ratio : inverse of cell size. */
   float iratio;
 
@@ -362,10 +373,22 @@ private:
 
   /** Road detector. */
   CTrackDetector *ctdet;
-  /** Number of detected mountain road sections. */
-  int count_of_roads;
   /** List of detected road sections. */
   std::vector<CarriageTrack *> road_sections;
+  /** Map of detected roads. */
+  AmrelMap *detection_map;
+
+  /** Connection seeds between connected components (for AMRELnet). */
+  std::vector<Pt2i> connection_seeds;
+
+
+  /**
+   * Completes the track detector features with application needs.
+   * Differenciation with AMRELnet.
+   */
+  void adaptTrackDetector ();
+
+bool isConnected (std::vector<std::vector<Pt2i> > &pts) const;
 
 };
 #endif

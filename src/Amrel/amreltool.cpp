@@ -49,7 +49,6 @@ AmrelTool::AmrelTool ()
   ptset = NULL;
   tile_loaded = false;
   buf_created = false;
-  track_map = NULL;
   iratio = 1.0f;
   out_seeds = NULL;
   out_sucseeds = NULL;
@@ -58,7 +57,7 @@ AmrelTool::AmrelTool ()
   if (bsdet.isSingleEdgeModeOn ()) bsdet.switchSingleOrDoubleEdge ();
   if (bsdet.isNFA ()) bsdet.switchNFA ();
   save_seeds = true;
-  count_of_roads = 0;
+  detection_map = NULL;
 }
 
 
@@ -67,6 +66,7 @@ AmrelTool::~AmrelTool ()
   clearFbsd ();
   clearSeeds ();
   clearAsd ();
+  if (detection_map != NULL) delete detection_map;
 }
 
 
@@ -160,12 +160,11 @@ void AmrelTool::addTrackDetector ()
   ctdet->model()->setSlopeTolerance (NOMINAL_SLOPE_TOLERANCE);
   ctdet->model()->setSideShiftTolerance (NOMINAL_SIDE_SHIFT_TOLERANCE);
   ctdet->model()->setBSmaxTilt (NOMINAL_PLATEAU_MAX_TILT);
-  if (cfg.tailMinSizeDefined ())
-    ctdet->model()->setTailMinSize (cfg.tailMinSize ());
   if (ptset != NULL)
     ctdet->setPointsGrid (ptset, vm_width, vm_height, sub_div, csize);
   cfg.setDetector (ctdet);
   ctdet->setAutomatic (true);
+  adaptTrackDetector ();
 }
 
 
@@ -300,7 +299,9 @@ void AmrelTool::run ()
     if (processSawing ())
       if (processAsd ())
       {
-        saveAsdImage ();
+        detection_map->setDisplayedSeeds (&connection_seeds);
+        saveAsdImage (AmrelConfig::RES_DIR
+                      + AmrelConfig::ROAD_FILE + AmrelConfig::IM_SUFFIX);
         if (cfg.isExportOn ())
         {
           if (cfg.isExportBoundsOn ()) exportRoads ();
@@ -405,7 +406,8 @@ void AmrelTool::run ()
     if (! loadSeeds ()) return;
     if (! loadTileSet (false, false)) return; // requires width & height
     processAsd ();
-    saveAsdImage ();
+    saveAsdImage (AmrelConfig::RES_DIR
+                  + AmrelConfig::ROAD_FILE + AmrelConfig::IM_SUFFIX);
     if (cfg.isExportOn ())
     {
       if (cfg.isExportBoundsOn ()) exportRoads ();
@@ -547,7 +549,6 @@ bool AmrelTool::processAsd ()
   road_sections.clear ();
   int num = 0;
   int unused = 0;
-  count_of_roads = 0;
   if (cfg.bufferSize () == 0 && ! tile_loaded)
   {
     if (ptset->loadPoints ()) tile_loaded = true;
@@ -560,10 +561,8 @@ bool AmrelTool::processAsd ()
   int cot = ptset->columnsOfTiles ();
   int rot = ptset->rowsOfTiles ();
   out_sucseeds = new std::vector<Pt2i>[cot * rot];
-  if (track_map == NULL) track_map = new unsigned short[vm_width * vm_height];
-  for (int j = 0; j < vm_height; j++)
-    for (int i = 0; i < vm_width; i++)
-      track_map[j * vm_width + i] = (unsigned short) 0;
+  if (detection_map != NULL) delete detection_map;
+  detection_map = new AmrelMap (vm_width, vm_height, &cfg);
   if (ctdet == NULL) addTrackDetector ();
   std::vector<Pt2i>::iterator it;
 
@@ -574,7 +573,6 @@ bool AmrelTool::processAsd ()
     int k = ptset->nextTile ();
     while (k != -1)
     {
-
       if (cfg.isVerboseOn ())
         std::cout << "  --> Tile " << k << " (" << k % cot << ", " << k / cot
                   << ") : " << out_seeds[k].size () << " seeds" << std::endl;
@@ -584,33 +582,29 @@ bool AmrelTool::processAsd ()
         Pt2i p1 (*it++);
         Pt2i p2 (*it++);
         Pt2i center ((p1.x () + p2.x ()) / 2, (p1.y () + p2.y ()) / 2);
-        if (track_map[(vm_height - 1 - center.y ()) * vm_width + center.x ()]
-            != (unsigned short) 0) unused ++;
+        if (detection_map->occupied (center)) unused ++;
         else
         {
-          count_of_roads ++;
           CarriageTrack *ct = ctdet->detect (p1, p2);
           if (ct != NULL && ct->plateau (0) != NULL)
           {
-            out_sucseeds[k].push_back (p1);
-            out_sucseeds[k].push_back (p2);
-            std::vector<Pt2i> pts;
-            ct->getConnectedPoints (&pts, true, vm_width, vm_height, iratio);
-            std::vector<Pt2i>::iterator pit = pts.begin ();
-            while (pit != pts.end ())
+            std::vector<std::vector<Pt2i> > pts;
+            if (cfg.isConnectedOn ())
+              ct->getConnectedPoints (&pts, true, vm_width, vm_height, iratio);
+            else ct->getPoints (&pts, true, vm_width, vm_height, iratio);
+            if (detection_map->add (pts))
             {
-              track_map[(vm_height - 1 - pit->y ()) * vm_width + pit->x ()]
-                  = (unsigned short) count_of_roads;
-              pit ++;
+              out_sucseeds[k].push_back (p1);
+              out_sucseeds[k].push_back (p2);
+              if (cfg.isExportOn ())
+              {
+                road_sections.push_back (ct);
+                ctdet->preserveDetection ();
+              }
             }
-            if (cfg.isExportOn ())
-            {
-              road_sections.push_back (ct);
-              ctdet->preserveDetection ();
-            }
+            num ++;
           }
         }
-        num ++;
       }
       if (ctdet->getOuts () != 0)
         std::cout << "  " << ctdet->getOuts () << " requests outside\n"
@@ -633,41 +627,39 @@ bool AmrelTool::processAsd ()
           Pt2i p1 (*it++);
           Pt2i p2 (*it++);
           Pt2i center ((p1.x () + p2.x ()) / 2, (p1.y () + p2.y ()) / 2);
-          if (track_map[(vm_height - 1 - center.y ()) * vm_width + center.x ()]
-              != (unsigned short) 0) unused ++;
+          if (detection_map->occupied (center)) unused ++;
           else
           {
-            count_of_roads ++;
             CarriageTrack *ct = ctdet->detect (p1, p2);
             if (ct != NULL && ct->plateau (0) != NULL)
             {
-              num ++;
-              out_sucseeds[k].push_back (p1);
-              out_sucseeds[k].push_back (p2);
-              std::vector<Pt2i> pts;
+              std::vector<std::vector<Pt2i> > pts;
               if (cfg.isConnectedOn ())
                 ct->getConnectedPoints (&pts, true,
                                         vm_width, vm_height, iratio);
               else ct->getPoints (&pts, true, vm_width, vm_height, iratio);
-              std::vector<Pt2i>::iterator pit = pts.begin ();
-              while (pit != pts.end ())
+              if (isConnected (pts))
               {
-                track_map[(vm_height - 1 - pit->y ()) * vm_width + pit->x ()]
-                  = (unsigned short) count_of_roads;
-                pit ++;
+                if (detection_map->add (pts))
+                {
+                  out_sucseeds[k].push_back (p1);
+                  out_sucseeds[k].push_back (p2);
+                  if (cfg.isExportOn ())
+                  {
+                    road_sections.push_back (ct);
+                    ctdet->preserveDetection ();
+                  }
+                }
               }
-              if (cfg.isExportOn ())
-              {
-                road_sections.push_back (ct);
-                ctdet->preserveDetection ();
-              }
+              else std::cout << "Road section " << num
+                             << " is not connected" << std::endl;
+              num ++;
             }
           }
         }
       }
     }
   }
-
   if (save_seeds)
   {
     saveSuccessfulSeeds ();
@@ -708,7 +700,7 @@ bool AmrelTool::processSawing ()
   std::vector<int> vals;
   std::ifstream input (cfg.tiles().c_str (), std::ios::in);
   bool reading = true;
-  if (input)
+  if (input.is_open ())
   {
     while (reading)
     {
@@ -748,7 +740,9 @@ bool AmrelTool::processSawing ()
     return false;
   }
   if (! dtm_in->assembleMap (ptset->columnsOfTiles (), ptset->rowsOfTiles (),
-                             ptset->xref (), ptset->yref (), true))
+                             ptset->xref (), ptset->yref (),
+                             true))     // for AMREL std
+                             // false))    // for AMRELnet
   {
     std::cout << "Unable to arrange DTM files in space" << std::endl;
     delete dtm_in;
@@ -801,7 +795,7 @@ bool AmrelTool::saveShadingMap ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::SLOPE_FILE
                     + AmrelConfig::MAP_SUFFIX);
   std::ofstream shading_out (name.c_str (), std::ios::out);
-  if (! shading_out)
+  if (! shading_out.is_open ())
   {
     std::cout << "Can't save shaded-DTM in " << name << std::endl;
     return false;
@@ -821,7 +815,7 @@ bool AmrelTool::loadShadingMap ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::SLOPE_FILE
                     + AmrelConfig::MAP_SUFFIX);
   std::ifstream shading_in (name.c_str (), std::ios::in);
-  if (! shading_in)
+  if (! shading_in.is_open ())
   {
     std::cout << name << ": can't be opened" << std::endl;
     return false;
@@ -842,7 +836,7 @@ bool AmrelTool::saveRorpoMap ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::RORPO_FILE
                     + AmrelConfig::MAP_SUFFIX);
   std::ofstream rorpo_out (name.c_str (), std::ios::out);
-  if (! rorpo_out)
+  if (! rorpo_out.is_open ())
   {
     std::cout << "Can't save Rorpo map in " << name << std::endl;
     return false;
@@ -862,7 +856,7 @@ bool AmrelTool::loadRorpoMap ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::RORPO_FILE
                     + AmrelConfig::MAP_SUFFIX);
   std::ifstream rorpo_in (name.c_str (), std::ios::in);
-  if (! rorpo_in)
+  if (! rorpo_in.is_open ())
   {
     std::cout << name << ": can't be opened" << std::endl;
     return false;
@@ -883,7 +877,7 @@ bool AmrelTool::saveSobelMap ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::SOBEL_FILE
                     + AmrelConfig::MAP_SUFFIX);
   std::ofstream sobel_out (name.c_str (), std::ios::out);
-  if (! sobel_out)
+  if (! sobel_out.is_open ())
   {
     std::cout << "Can't save Sobel map in " << name << std::endl;
     return false;
@@ -903,7 +897,7 @@ bool AmrelTool::loadSobelMap ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::SOBEL_FILE
                     + AmrelConfig::MAP_SUFFIX);
   std::ifstream sobel_in (name.c_str (), std::ios::in);
-  if (! sobel_in)
+  if (! sobel_in.is_open ())
   {
     std::cout << name << ": can't be opened" << std::endl;
     return false;
@@ -925,7 +919,7 @@ bool AmrelTool::saveFbsdSegments ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::FBSD_FILE
                     + AmrelConfig::FBSD_SUFFIX);
   std::ofstream fbsd_out (name.c_str (), std::ios::out);
-  if (! fbsd_out)
+  if (! fbsd_out.is_open ())
   {
     std::cout << "Can't save FBSD segments in " << name << std::endl;
     return false;
@@ -951,7 +945,7 @@ bool AmrelTool::loadFbsdSegments ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::FBSD_FILE
                     + AmrelConfig::FBSD_SUFFIX);
   std::ifstream fbsd_in (name.c_str (), std::ios::in);
-  if (! fbsd_in)
+  if (! fbsd_in.is_open ())
   {
     std::cout << name << ": can't be opened" << std::endl;
     return false;
@@ -978,7 +972,7 @@ bool AmrelTool::saveSeeds ()
   if (cfg.isVerboseOn ())
     std::cout << "Saving seeds in " << name << std::endl;
   std::ofstream seeds_out (name.c_str (), std::ios::out);
-  if (! seeds_out)
+  if (! seeds_out.is_open ())
   {
     std::cout << "Can't save seeds in " << name << std::endl;
     return false;
@@ -1086,7 +1080,7 @@ bool AmrelTool::loadSeeds ()
   std::string name (AmrelConfig::RES_DIR + AmrelConfig::SEED_FILE
                     + AmrelConfig::SEED_SUFFIX);
   std::ifstream seeds_in (name.c_str (), std::ios::in);
-  if (! seeds_in)
+  if (! seeds_in.is_open ())
   {
     std::cout << name << ": can't be opened" << std::endl;
     return false;
@@ -1569,125 +1563,175 @@ void AmrelTool::saveSeedsImage ()
 }
 
 
-void AmrelTool::saveAsdImage ()
+void AmrelTool::saveAsdImage (std::string name)
 {
-  unsigned short *map = track_map;
+  if (cfg.isBackDtmOn () && dtm_in == NULL) loadTileSet (true, false);
+  saveAsdImage (name, cfg.isFalseColorOn (),
+                      cfg.isBackDtmOn () ? dtm_in : NULL);
+}
+
+
+void AmrelTool::saveAsdImage (std::string name, bool colorOn, TerrainMap *bg)
+{
+  unsigned short *map = detection_map->getMap ();
   if (map == NULL) return;
+  int mw = detection_map->width ();
+  int mh = detection_map->height ();
+  int nbroads = detection_map->numberOfRoads ();
 
   uint32_t alpha = (uint32_t) (256 * 256) * (uint32_t) (256 * 255);
   uint32_t gray = (uint32_t) (256 * 256 + 257);
   uint32_t white = alpha + 255 * gray;
 
-  if (cfg.isFalseColorOn ())
+  if (colorOn)
   {
     srand (time (NULL));
-    unsigned char *red = new unsigned char[count_of_roads + 1];
-    unsigned char *green = new unsigned char[count_of_roads + 1];
-    unsigned char *blue = new unsigned char[count_of_roads + 1];
+    unsigned char *red = new unsigned char[nbroads];
+    unsigned char *green = new unsigned char[nbroads];
+    unsigned char *blue = new unsigned char[nbroads];
     red[0] = (unsigned char) 255;
     green[0] = (unsigned char) 255;
     blue[0] = (unsigned char) 255;
-    for (int i = 1; i <= count_of_roads; i ++)
+    for (int i = 1; i < nbroads; i ++)
     {
       bool nok = true;
       while (nok)
       {
-        red[i] = rand () % 256;
-        green[i] = rand () % 256;
-        blue[i] = rand () % 256;
-        nok = ((red[i] + green[i] + blue[i]) > 300);     // < 300 si fond noir
+        red[i] = (unsigned char) (rand () % 256);
+        green[i] = (unsigned char) (rand () % 256);
+        blue[i] = (unsigned char) (rand () % 256);
+        nok = ((int) red[i] + (int) green[i] + (int) blue[i] > 300);
+        // < 300 if black background
       }
     }
 
-    uint32_t *im = new uint32_t[vm_width * vm_height];
+    uint32_t *im = new uint32_t[mw * mh];
     uint32_t *pim = im;
-    if (cfg.isBackDtmOn ())
+    if (bg != NULL)
     {
-      if (dtm_in == NULL) loadTileSet (true, false);
-      if (dtm_in != NULL)
-      {
-        for (int j = 0; j < vm_height; j++)
-          for (int i = 0; i < vm_width; i++)
-          {
-            uint32_t val = dtm_in->get (i, j);
-            if (val > 255) val = 255;
-            else if (val < 0) val = 0;
-            *pim++ = alpha + val * gray;
-          }
-        pim = im;
-      }
+      for (int j = 0; j < mh; j++)
+        for (int i = 0; i < mw; i++)
+        {
+          uint32_t val = bg->get (i, j);
+          if (val > 255) val = 255;
+          else if (val < 0) val = 0;
+          *pim++ = alpha + val * gray;
+        }
+      pim = im;
     }
-    for (int i = 0; i < vm_width * vm_height; i++)
+    for (int i = 0; i < mw * mh; i++)
     {
-      if (*map != 0 || ! cfg.isBackDtmOn ())
+      if (*map != (unsigned short) 0)
         *pim = alpha + (uint32_t) (red[*map] + green[*map] * 256
                                    + blue[*map] * 256 * 256);
       pim++;
       map++;
     }
-    std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
-                                             + AmrelConfig::IM_SUFFIX);
-    stbi_write_png (imname.c_str (), vm_width, vm_height, 4, im, 0);
+    delete [] red;
+    delete [] green;
+    delete [] blue;
+    stbi_write_png (name.c_str (), mw, mh, 4, im, 0);
   }
   else
   {
-    if (cfg.isBackDtmOn ())
+    if (bg != NULL)
     {
-      uint32_t *im = new uint32_t[vm_width * vm_height];
+      uint32_t *im = new uint32_t[mw * mh];
       uint32_t *pim = im;
-      if (dtm_in == NULL) loadTileSet (true, false);
-      if (dtm_in != NULL)
-      {
-        for (int j = 0; j < vm_height; j++)
-          for (int i = 0; i < vm_width; i++)
-          {
-            uint32_t val = dtm_in->get (i, j);
-            if (val > 255) val = 255;
-            else if (val < 0) val = 0;
-            *pim++ = alpha + val * gray;
-          }
-        pim = im;
-      }
-      for (int i = 0; i < vm_width * vm_height; i++)
+      for (int j = 0; j < mh; j++)
+        for (int i = 0; i < mw; i++)
+        {
+          uint32_t val = bg->get (i, j);
+          if (val > 255) val = 255;
+          else if (val < 0) val = 0;
+          *pim++ = alpha + val * gray;
+        }
+      pim = im;
+      for (int i = 0; i < mw * mh; i++)
       {
         if (cfg.isColorInversion ())
         {
-          if (*map == 0) *pim = white;
+          if (*map == (unsigned short) 0) *pim = white;
         }
         else 
         {
-          if (*map != 0) *pim = white;
+          if (*map != (unsigned short) 0) *pim = white;
         }
         pim++;
         map++;
       }
-      std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
-                                               + AmrelConfig::IM_SUFFIX);
-      stbi_write_png (imname.c_str (), vm_width, vm_height, 4, im, 0);
+      stbi_write_png (name.c_str (), mw, mh, 4, im, 0);
     }
     else
     {
-      unsigned char *im = new unsigned char[vm_width * vm_height];
+      unsigned char *im = new unsigned char[mw * mh];
       unsigned char *pim = im;
 
-      for (int i = 0; i < vm_width * vm_height; i++)
+      for (int i = 0; i < mw * mh; i++)
       {
         if (cfg.isColorInversion ())
         {
-          if (*map == 0) *pim = (unsigned char) 255;
+          if (*map == (unsigned short) 0) *pim = (unsigned char) 255;
         }
         else 
         {
-          if (*map != 0) *pim = (unsigned char) 255;
+          if (*map != (unsigned short) 0) *pim = (unsigned char) 255;
         }
         pim++;
         map++;
       }
-      std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
-                                               + AmrelConfig::IM_SUFFIX);
-      stbi_write_png (imname.c_str (), vm_width, vm_height, 1, im, 0);
+      stbi_write_png (name.c_str (), mw, mh, 1, im, 0);
     }
   }
+}
+
+
+int AmrelTool::countRoadPixels ()
+{
+  int iw = 0, ih = 0, ich = 0;
+  std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
+                                           + AmrelConfig::IM_SUFFIX);
+  unsigned char *im
+    = (unsigned char *) stbi_load (imname.c_str (), &iw, &ih, &ich, 1);
+  if (im == NULL || iw <= 0 || ih <= 0 || ich != 1)
+  {
+    if (cfg.isVerboseOn ())
+      if (im == NULL) std::cout << "Wrong file " << imname << std::endl;
+    else
+    {
+      if (iw <= 0 || ih <= 0) std::cout << imname << ": wrong size "
+                                        << iw << " x " << ih << std::endl;
+      if (ich != 1) std::cout << imname << ": wrong format "
+                                        << ich << " channels" << std::endl;
+    }
+    return -1;
+  }
+  unsigned char *pim = im;
+  int nbi = 0, nbr = 0;
+  for (int i = 0; i < ih * iw; i ++)
+  {
+    if (*pim++ > 100) nbr ++;
+//    if (*pim++ != 0) nbr ++;
+    nbi ++;
+  }
+  if (cfg.isVerboseOn ())
+    std::cout << "# road pixels = " << nbr << " / " << nbi << std::endl;
+  delete [] im;
+  return nbr;
+}
+
+
+bool AmrelTool::isConnected (std::vector<std::vector<Pt2i> > &pts) const
+{
+  (void) pts;
+  return true;
+}
+
+
+void AmrelTool::adaptTrackDetector ()
+{
+  if (cfg.tailMinSizeDefined ())
+    ctdet->model()->setTailMinSize (cfg.tailMinSize ());
 }
 
 
@@ -1901,39 +1945,4 @@ void AmrelTool::compareRoads ()
 
   delete [] im1;
   delete [] im2;
-}
-
-
-int AmrelTool::countRoadPixels ()
-{
-  int iw = 0, ih = 0, ich = 0;
-  std::string imname (AmrelConfig::RES_DIR + AmrelConfig::ROAD_FILE
-                                           + AmrelConfig::IM_SUFFIX);
-  unsigned char *im
-    = (unsigned char *) stbi_load (imname.c_str (), &iw, &ih, &ich, 1);
-  if (im == NULL || iw <= 0 || ih <= 0 || ich != 1)
-  {
-    if (cfg.isVerboseOn ())
-      if (im == NULL) std::cout << "Wrong file " << imname << std::endl;
-    else
-    {
-      if (iw <= 0 || ih <= 0) std::cout << imname << ": wrong size "
-                                        << iw << " x " << ih << std::endl;
-      if (ich != 1) std::cout << imname << ": wrong format "
-                                        << ich << " channels" << std::endl;
-    }
-    return -1;
-  }
-  unsigned char *pim = im;
-  int nbi = 0, nbr = 0;
-  for (int i = 0; i < ih * iw; i ++)
-  {
-    if (*pim++ > 100) nbr ++;
-//    if (*pim++ != 0) nbr ++;
-    nbi ++;
-  }
-  if (cfg.isVerboseOn ())
-    std::cout << "# road pixels = " << nbr << " / " << nbi << std::endl;
-  delete [] im;
-  return nbr;
 }
