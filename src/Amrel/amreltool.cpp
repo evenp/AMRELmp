@@ -22,6 +22,7 @@
 #include <iostream>
 #include <fstream>
 #include <cmath>
+#include <ctime>
 #include "amreltool.h"
 #include "shapefil.h"
 
